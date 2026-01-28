@@ -20,13 +20,13 @@ DISPATCH_INTERVAL = 5  # seconds
 LAST_DISPATCH_TIME = 0
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "mistral"
+OLLAMA_MODEL = "qwen2.5:1.5b"
 
 def ollama_analyze(text):
     prompt = f"""
 You are a strict JSON generator.
 
-ONLY return valid JSON. No markdown. No comments. No explanations.
+ONLY return valid JSON. No markdown. No comments. No explanations. Refer {ALERT_KEYWORDS} for priority hints.
 Message:
 {text}
 
