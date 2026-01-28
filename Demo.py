@@ -8,6 +8,202 @@ import joblib
 import os
 import datetime
 import time
+import requests
+import json
+import re
+import threading
+from collections import deque
+from queue import Queue
+AGENT_INPUT_QUEUE = Queue()
+AGENT_QUEUE = deque()
+DISPATCH_INTERVAL = 5  # seconds
+LAST_DISPATCH_TIME = 0
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "mistral"
+
+def ollama_analyze(text):
+    prompt = f"""
+You are a strict JSON generator.
+
+ONLY return valid JSON. No markdown. No comments. No explanations.
+Message:
+{text}
+
+JSON schema:
+{{
+ "language": "Tamil|Kannada|Hindi|Punjabi|Telugu|Malayalam|Bengali|Assamese|Gujarati|English|Unknown",
+ "region": "Tamil Nadu|Karnataka|Delhi|Telangana|Kerala|West Bengal|Assam|Gujarat|Andhra Pradesh|Punjab|All",
+ "priority": "P1|P2|P3|P4",
+ "is_alert": true|false
+}}
+"""
+
+    try:
+        res = requests.post("http://localhost:11434/api/generate", json={
+            "model": "mistral",
+            "prompt": prompt,
+            "stream": False
+        }, timeout=500)
+
+        raw = res.json().get("response", "").strip()
+
+        # HARD CLEANUP — strip code blocks if Ollama adds them
+        raw = re.sub(r"```json|```", "", raw).strip()
+
+        # Try parsing safely
+        return json.loads(raw)
+
+    except Exception as e:
+        print("OLLAMA FAIL:", e)
+        return None
+ALERT_KEYWORDS = {
+    "P1": [
+        # English
+        "earthquake", "tsunami", "gas leak", "evacuate", "shooter", "explosion", "fire", "Political issue",
+        # Kannada
+        "ಭೂಕಂಪ", "ಸ್ಫೋಟ", "ಅಗ್ನಿ", "ಬಾಂಬ್",
+        # Tamil
+        "நிலநடுக்கம்", "சுனாமி", "வெடிப்பு", "தீ", "வாயு கசிவு",
+        # Telugu
+        "భూకంపం", "సునామీ", "విస్ఫోటనం", "అగ్ని",
+        # Malayalam
+        "ഭൂകമ്പം", "സുനാമി", "വിസ്ഫോടനം", "തീ",
+        # Hindi
+        "भूकंप", "सुनामी", "विस्फोट", "आग",
+        # Punjabi
+        "ਭੂਚਾਲ", "ਸੁਨਾਮੀ", "ਵਿਸਫੋਟ", "ਅੱਗ",
+        # Bengali
+        "ভূমিকম্প", "সুনামি", "বিস্ফোরণ", "আগুন",
+        # Assamese
+        "ভূমিকম্প", "সুনামি", "বিস্ফোৰণ", "আগুন",
+        # Gujarati
+        "ભૂકંપ", "સુનામી", "વિસ્ફોટ", "આગ",
+    ],
+    "P2": [
+        "cyclone", "flood", "storm", "industrial","education","state-specific",
+        "ಚಂಡಮಾರುತ", "ನೆರೆ", "ಮಳೆ",
+        "புயல்", "வெள்ளம்",
+        "చక్రవాతం", "వరద",
+        "ചുഴലിക്കാറ്റ്", "വെള്ളപ്പൊക്കം",
+        "तूफान", "बाढ़",
+        "ਤੂਫ਼ਾਨ", "ਬਾਰਿਸ਼",
+        "ঘূর্ণিঝড়", "বন্যা",
+        "ঘূর্ণিঝড়", "বন্যা",
+        "ચક્રવાત", "બારિશ",
+
+    ],
+    "P3": [
+        "traffic", "road closed", "water supply", "power outage","Radio broadcast","FM","city specific",
+        "ಟ್ರಾಫಿಕ್", "ನೀರಿನ ಕೊರತೆ",
+        "போக்குவரத்து", "மின்தடை",
+        "ట్రాఫిక్", "నీటి కొరత",
+        "ഗതാഗതം", "വൈദ്യുതി തകരാർ",
+        "यातायात", "बिजली कटौती",
+        "ਟ੍ਰੈਫਿਕ", "ਬਿਜਲੀ ਕੱਟੌਤੀ",
+        "ট্রাফিক", "বিদ্যুৎ বিভ্রাট",
+        "ট্রাফিক", "বিদ্যুৎ বিভ্রাট",
+        "ટ્રાફિક", "પાણી પુરવઠો",
+
+    ],
+    "P4":[
+        "weather update", "general info", "community event", "festival","cultural event",
+        "ಹವಾಮಾನ", "ಸಾಮಾನ್ಯ ಮಾಹಿತಿ",
+        "வானிலை", "பொது தகவல்",
+        "వాతావరణం", "సాధారణ సమాచారం",
+        "വാനില", "പൊതുവിവരം",
+        "मौसम", "सामान्य जानकारी",
+        "ਮੌਸਮ", "ਆਮ ਜਾਣਕਾਰੀ",
+        "আবহাওয়া", "সাধারণ তথ্য",
+        "আবহাওয়া", "সাধারণ তথ্য",
+        "હવામાન", "સામાન્ય માહિતી",
+    ]
+}
+
+
+LANGUAGE_HINTS = {
+    "Tamil Nadu": ["வணக்கம்", "நிலநடுக்கம்", "புயல்"],
+    "Kerala": ["വെള്ളപ്പൊക്കം", "ചുഴലിക്കാറ്റ്"],
+    "Karnataka": ["ಭೂಕಂಪ", "ಚಂಡಮಾರುತ"],
+    "Andhra Pradesh": ["భూకంపం", "చక్రవాతం"],
+    "Telangana": ["భూకంపం", "చక్రవాతం"],
+    "Delhi": ["earthquake", "alert", "emergency", "भूकंप"],
+    "Gujarat": ["ભૂકંપ", "ચક્રવાત"],
+    "Assam": ["ভূমিকম্প", "বন্যা"],
+    "West Bengal": ["ভূমিকম্প", "ঘূর্ণিঝড়"],
+    "Punjab": ["ਭੂਚਾਲ", "ਤੂਫ਼ਾਨ"]
+}
+
+def detect_priority(text):
+    text = text.lower()
+    for p, words in ALERT_KEYWORDS.items():
+        if any(w in text for w in words):
+            return p
+    return "P4"  # informational
+
+def detect_region_deterministic(text):
+    for region, hints in LANGUAGE_HINTS.items():
+        if any(h in text for h in hints):
+            return region
+    return None
+
+def agent_decide_and_schedule(raw_content):
+
+    # 1) Deterministic pass
+    priority = detect_priority(raw_content)
+    region = detect_region_deterministic(raw_content)
+
+    # 2) Ollama fallback
+    if (priority == "P4" or region is None):
+        ai = ollama_analyze(raw_content)
+        if ai:
+            priority = ai.get("priority", priority)
+            region = ai.get("region", region)
+
+    if region is None:
+        region = "All"
+
+    # 3) Store decision
+    job = {
+        "content": raw_content,
+        "priority": priority,
+        "region": region,
+        "timestamp": time.time()
+    }
+
+    AGENT_QUEUE.append(job)
+
+    return f"Queued → {priority} → {region}"
+
+PRIORITY_ORDER = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
+
+def agent_dispatch():
+    global LAST_DISPATCH_TIME
+
+    if not AGENT_QUEUE:
+        return
+
+    now = time.time()
+    if now - LAST_DISPATCH_TIME < DISPATCH_INTERVAL:
+        return
+
+    LAST_DISPATCH_TIME = now
+
+    sorted_jobs = sorted(
+        list(AGENT_QUEUE),
+        key=lambda j: (PRIORITY_ORDER[j["priority"]], j["timestamp"])
+    )
+
+    job = sorted_jobs[0]
+    AGENT_QUEUE.remove(job)
+
+    execute_broadcast(job["content"], forced_region=job["region"])
+    live_monitor_log.append(
+        f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+        f"AGENT DISPATCH → {job['priority']} → {job['region']}"
+    )
+
+
 
 # -----------------------------
 # 1. PHYSICS & NETWORK CONSTANTS
@@ -23,6 +219,10 @@ DISTANCES_FROM_DELHI = {
     "Punjab": 300,
     "Telangana": 1500,
     "Assam": 1900,
+    "West Bengal": 1300,
+    "Gujarat": 800,
+    "Karnataka": 2000,
+    "Andhra Pradesh": 1400,
     "Tamil Nadu": 2200,
     "Kerala": 2600,
     "All": 1300        
@@ -131,20 +331,24 @@ if os.path.exists(MODEL_FILE) and os.path.exists(VECTORIZER_FILE):
         MODEL_ACTIVE = True
     except: pass
 
-REGION_MAP_ML = {'TAMIL':'Tamil Nadu', 'HINDI':'Delhi', 'TELUGU':'Telangana', 'MALAYALAM':'Kerala', 'PUNJAB':'Punjab', 'ASSAM':'Assam', 'ENGLISH':'All'}
-REGION_MAPPING = {1: "Tamil Nadu", 2: "Kerala", 3: "Telangana", 4: "Delhi", 5: "Punjab", 6: "Assam"}
+REGION_MAP_ML = {'TAMIL':'Tamil Nadu', 'HINDI':'Delhi','GUJARATI':'Gujarat', 'TELUGU':['Telangana','Andhra Pradesh'], 'MALAYALAM':'Kerala','KANNADA':'Karnataka','BENGALI':'West Bengal', 'PUNJAB':'Punjab', 'ASSAM':'Assam', 'ENGLISH':'All'}
+REGION_MAPPING = {1: "Tamil Nadu", 2: "Kerala", 3: "Telangana", 4: "Delhi", 5: "Punjab", 6: "Assam", 7: "Gujarat", 8: "West Bengal", 9: "Karnataka", 10: "Andhra Pradesh"}
 REGIONS_GEOM = {
     1: [(5, 5), (30, 8), (28, 25), (6, 22)],
     2: [(30, 8), (55, 6), (60, 22), (28, 25)],
     3: [(55, 6), (95, 10), (90, 25), (60, 22)],
     4: [(6, 22), (28, 25), (30, 52), (5, 48)],
     5: [(28, 25), (60, 22), (58, 52), (30, 52)],
-    6: [(60, 22), (90, 25), (95, 50), (58, 52)]
+    6: [(60, 22), (90, 25), (95, 50), (58, 52)],
+    7: [(5, 48), (30, 52), (28, 65), (5, 62)],
+    8: [(30, 52), (58, 52), (60, 65), (28, 65)],
+    9: [(58, 52), (95, 50), (90, 65), (60, 65)],
+    10: [(55, 6), (95, 10), (90, 25), (60, 22)]
 }
 
 broadcast_system = ATSC3_Strategy() 
 kpi_engine = KPITracker()
-broadcast_queue = []
+broadcast_queue = AGENT_QUEUE
 ue_inboxes = {}
 live_monitor_log = []
 
@@ -179,26 +383,79 @@ print(f"DEBUG: Generated {len(UEs)} UEs.")
 # 5. CONTROLLER LOGIC (WITH PHYSICS & STACKING)
 # -----------------------------
 def add_to_queue(event=None):
-    root = tk.Tk(); root.withdraw()
+    '''root = tk.Tk(); root.withdraw()
     content = simpledialog.askstring("Scheduler", "Enter content:")
     if content:
         broadcast_queue.append(content)
         messagebox.showinfo("Success", "Added to Broadcast Schedule!")
+    root.destroy()'''
+    '''root = tk.Tk(); root.withdraw()
+    content = simpledialog.askstring("Scheduler", "Enter content:")
+    if content:
+        decision = agent_decide_and_schedule(content)
+        messagebox.showinfo("Agent Decision", decision)
+    root.destroy()'''
+    '''root = tk.Tk(); root.withdraw()
+    content = simpledialog.askstring("Scheduler", "Enter content:")
+    if content:
+        decision = agent_decide_and_schedule(content)
+        messagebox.showinfo("Agent Decision", decision)
+    root.destroy()'''
+    root = tk.Tk(); root.withdraw()
+    content = simpledialog.askstring("Scheduler", "Enter content:")
+    if content:
+        AGENT_INPUT_QUEUE.put(content)
+        messagebox.showinfo("Agent", "Message submitted to agent.")
     root.destroy()
 
-def execute_broadcast(raw_content):
+def agent_worker():
+    while True:
+        raw_content = AGENT_INPUT_QUEUE.get()
+
+        priority = detect_priority(raw_content)
+        region = detect_region_deterministic(raw_content)
+
+        if priority == "P4" or region is None:
+            ai = ollama_analyze(raw_content)
+            if ai:
+                priority = ai.get("priority", priority)
+                region = ai.get("region", region)
+
+        if region is None:
+            region = "All"
+
+        job = {
+            "content": raw_content,
+            "priority": priority,
+            "region": region,
+            "timestamp": time.time()
+        }
+
+        AGENT_QUEUE.append(job)
+        live_monitor_log.append(
+            f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+            f"AGENT QUEUED → {priority} → {region}"
+        )
+
+        AGENT_INPUT_QUEUE.task_done()
+
+
+def execute_broadcast(raw_content,forced_region=None):
     # 1. Classification
-    target_region = "All"
+    target_region = forced_region or "All"
     if MODEL_ACTIVE:
         try: target_region = REGION_MAP_ML.get(clf.predict(vectorizer.transform([raw_content]))[0].upper(), "All")
         except: pass
     else:
         if any(w in raw_content for w in ["வணக்கம்", "Tamil"]): target_region = "Tamil Nadu"
         elif any(w in raw_content for w in ["Kerala", "Malayalam"]): target_region = "Kerala"
+        elif any(w in raw_content for w in ["Karnataka", "Kannada"]): target_region = "Karnataka"
+        elif any(w in raw_content for w in ["Andhra", "Telugu"]): target_region = "Andhra Pradesh"
+        elif any(w in raw_content for w in ["Bengali", "West Bengal"]): target_region = "West Bengal"
         elif any(w in raw_content for w in ["Delhi", "Hindi"]): target_region = "Delhi"
         elif any(w in raw_content for w in ["Punjab"]): target_region = "Punjab"
         elif any(w in raw_content for w in ["Assam"]): target_region = "Assam"
-        elif any(w in raw_content for w in ["Telangana"]): target_region = "Telangana"
+        elif any(w in raw_content for w in ["Telangana","Telugu"]): target_region = "Telangana"
 
     # 2. Encapsulation
     service_id = next((rid for rid, name in REGION_MAPPING.items() if name == target_region), 99)
@@ -240,24 +497,127 @@ def execute_broadcast(raw_content):
     return target_region, receivers
 
 def open_cart(event=None):
-    if not broadcast_queue:
-        root = tk.Tk(); root.withdraw(); messagebox.showinfo("Info", "Schedule is empty."); root.destroy(); return
-    win = tk.Tk(); win.title("Broadcast Schedule"); win.geometry("400x350")
-    frame = tk.Frame(win); frame.pack(fill="both", expand=True)
+    auto_refresh()
+    if not AGENT_QUEUE:
+        root = tk.Tk(); root.withdraw()
+        messagebox.showinfo("Info", "Agent queue is empty.")
+        root.destroy()
+        return
+
+    win = tk.Tk()
+    win.title("Agent Broadcast Queue")
+    win.geometry("520x350")
+
+    frame = tk.Frame(win)
+    frame.pack(fill="both", expand=True)
+
     def refresh():
-        for w in frame.winfo_children(): w.destroy()
-        for i, c in enumerate(broadcast_queue):
-            row = tk.Frame(frame); row.pack(fill="x", pady=2)
-            tk.Label(row, text=f"{i+1}. {c[:20]}..").pack(side="left")
-            tk.Button(row, text="Broadcast", command=lambda idx=i: send_item(idx), bg="#c8e6c9").pack(side="right")
-            tk.Button(row, text="Remove", command=lambda idx=i: del_item(idx), bg="#ffcdd2").pack(side="right")
-    def del_item(idx): broadcast_queue.pop(idx); refresh()
-    def send_item(idx):
-        c = broadcast_queue.pop(idx)
-        r, cnt = execute_broadcast(c)
+        for w in frame.winfo_children():
+            w.destroy()
+
+        sorted_jobs = sorted(
+            list(AGENT_QUEUE),
+            key=lambda j: (PRIORITY_ORDER[j["priority"]], j["timestamp"])
+        )
+
+        for i, job in enumerate(sorted_jobs):
+            age = int(time.time() - job["timestamp"])
+            row = tk.Frame(frame)
+            row.pack(fill="x", pady=2)
+
+            label = f"{i+1}. [{job['priority']}] {job['region']} | {age}s | {job['content'][:25]}..."
+            tk.Label(row, text=label).pack(side="left")
+
+            tk.Button(row, text="Force Send",
+                      command=lambda j=job: force_send(j),
+                      bg="#c8e6c9").pack(side="right")
+
+            tk.Button(row, text="Drop",
+                      command=lambda j=job: drop_job(j),
+                      bg="#ffcdd2").pack(side="right")
+    def auto_refresh():
         refresh()
-        messagebox.showinfo("Report", f"Broadcasted to {r}\nReceivers: {cnt}")
-    refresh(); win.mainloop()
+        win.after(1000, auto_refresh)
+
+    auto_refresh()
+
+    def force_send(job):
+        AGENT_QUEUE.remove(job)
+        execute_broadcast(job["content"])
+        refresh()
+
+    def drop_job(job):
+        AGENT_QUEUE.remove(job)
+        refresh()
+
+    refresh()
+    win.mainloop()
+'''QUEUE_LOCK = threading.Lock()
+def open_cart(event=None):
+    win = tk.Tk()
+    win.title("Agent Broadcast Queue")
+    win.geometry("520x350")
+
+    frame = tk.Frame(win)
+    frame.pack(fill="both", expand=True)
+
+    def refresh():
+        with QUEUE_LOCK:
+            jobs = list(AGENT_QUEUE)
+
+        for w in frame.winfo_children():
+            w.destroy()
+
+        if not jobs:
+            tk.Label(frame, text="Agent queue is empty.", fg="gray").pack(pady=20)
+            return
+
+        sorted_jobs = sorted(
+            jobs,
+            key=lambda j: (PRIORITY_ORDER[j["priority"]], j["timestamp"])
+        )
+
+        for i, job in enumerate(sorted_jobs):
+            age = int(time.time() - job["timestamp"])
+
+            row = tk.Frame(frame)
+            row.pack(fill="x", pady=2)
+
+            label = f"{i+1}. [{job['priority']}] {job['region']} | {age}s | {job['content'][:25]}..."
+            tk.Label(row, text=label).pack(side="left")
+
+            tk.Button(
+                row, text="Force Send",
+                command=lambda j=job: force_send(j),
+                bg="#c8e6c9"
+            ).pack(side="right")
+
+            tk.Button(
+                row, text="Drop",
+                command=lambda j=job: drop_job(j),
+                bg="#ffcdd2"
+            ).pack(side="right")
+
+    def auto_refresh():
+        refresh()
+        win.after(1000, auto_refresh)
+
+    def force_send(job):
+        with QUEUE_LOCK:
+            if job in AGENT_QUEUE:
+                AGENT_QUEUE.remove(job)
+        execute_broadcast(job["content"], forced_region=job["region"])
+        refresh()
+
+    def drop_job(job):
+        with QUEUE_LOCK:
+            if job in AGENT_QUEUE:
+                AGENT_QUEUE.remove(job)
+        refresh()
+
+    auto_refresh()
+    win.mainloop()'''
+
 
 def open_monitor(event=None):
     root = tk.Tk(); root.title("Broadcast Monitor & KPIs")
@@ -317,7 +677,7 @@ btn_cart.on_clicked(open_cart)
 btn_mon.on_clicked(open_monitor)
 
 # Draw Map
-colors = plt.cm.Set3(np.linspace(0, 1, 6))
+colors = plt.cm.Set3(np.linspace(0, 1, 11))
 for i, (rid, poly) in enumerate(REGIONS_GEOM.items()):
     ax.add_patch(Polygon(poly, closed=True, color=colors[i], alpha=0.5))
     cx, cy = np.mean([p[0] for p in poly]), np.mean([p[1] for p in poly])
@@ -329,6 +689,12 @@ ax.scatter([u["Position"][0] for u in UEs], [u["Position"][1] for u in UEs],
            s=30, c='blue', picker=True, zorder=10, label="UEs")
 
 fig.canvas.mpl_connect('pick_event', on_pick)
+threading.Thread(target=agent_worker, daemon=True).start()
+def agent_loop():
+    agent_dispatch()
+timer = fig.canvas.new_timer(interval=1000)
+timer.add_callback(agent_loop)
+timer.start()
 
 
 ax.set_xlim(-5, 105)
@@ -336,3 +702,5 @@ ax.set_ylim(-5, 65)
 ax.set_title("Broadcast Simulation", fontsize=14)
 ax.axis('off')
 plt.show()
+
+
