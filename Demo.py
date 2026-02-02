@@ -26,7 +26,7 @@ def ollama_analyze(text):
     prompt = f"""
 You are a strict JSON generator.
 
-ONLY return valid JSON. No markdown. No comments. No explanations. Refer {ALERT_KEYWORDS} for priority hints.
+ONLY return valid JSON. No markdown. No comments. No explanations. Refer {ALERT_KEYWORDS} for priority hints. 
 Message:
 {text}
 
@@ -265,6 +265,58 @@ class ATSC3_Strategy(BroadcastSystem):
 # -----------------------------
 # 3. KPI ANALYTICS ENGINE (STACKED VERSION)
 # -----------------------------
+def calculate_spectral_efficiency(packet):
+    CHANNEL_BW = 6.0 * 10**6
+    LDM_GAIN = 1.40 
+    OVERHEAD_LOSS = 0.20
+    THROUGHPUT = 2.5 * 10**6
+
+    useful_bits = packet['payload_size_bits']
+    total_bits = packet['header']['size_bits'] + useful_bits
+    tx_duration = total_bits / THROUGHPUT
+
+    raw_efficiency = (useful_bits / (CHANNEL_BW * tx_duration)) * 100
+    final_efficiency = raw_efficiency * LDM_GAIN * (1.0 - OVERHEAD_LOSS)
+    return min(final_efficiency, 99.9)
+
+def calculate_relevance(packet, user_region):
+    if packet['metadata']['target_region'] == "All":
+        return 10.0
+    return 100.0 if packet['metadata']['target_region'] == user_region else 0.0
+
+def calculate_latency(target_region, payload_bits):
+    SPEED_FIBER = 200000.0
+    SPEED_AIR = 300000.0
+    INTERLEAVING_DELAY = 0.200
+    THROUGHPUT = 2.5 * 10**6
+
+    dist_km = DISTANCES_FROM_DELHI.get(target_region, 1300)
+    t_backhaul = dist_km / SPEED_FIBER
+    t_trans = payload_bits / THROUGHPUT
+    t_ota = 50.0 / SPEED_AIR
+
+    return t_backhaul + INTERLEAVING_DELAY + t_trans + t_ota
+
+def calculate_reliability(distance_km):
+    TX_POWER = 43.0
+    NOISE_FLOOR = -95.0
+    PATH_LOSS_EXP = 2.8
+    SHADOWING_STD = 4.0
+    THRESHOLD_SNR = -5.0
+
+    path_loss = 10 * PATH_LOSS_EXP * np.log10(distance_km)
+    shadowing = np.random.normal(0, SHADOWING_STD)
+    rx_power = TX_POWER - path_loss + shadowing
+    snr = rx_power - NOISE_FLOOR
+
+    probability = 1 / (1 + np.exp(-(snr - THRESHOLD_SNR)))
+    return probability * 100.0
+
+def calculate_energy_efficiency(useful_bits, airtime_sec):
+    TX_POWER_WATTS = 20.0
+    energy = TX_POWER_WATTS * airtime_sec
+    return useful_bits / energy if energy > 0 else 0.0
+
 class KPITracker:
     def __init__(self):
         # Global Aggregates
@@ -277,7 +329,7 @@ class KPITracker:
         # Transaction History (The Stack)
         self.history_log = [] 
 
-    def record_transmission(self, packet, latency_sec, is_relevant, target_region):
+    '''def record_transmission(self, packet, latency_sec, is_relevant, target_region):
         # Update Aggregates
         self.latencies.append(latency_sec)
         pkt_total = packet['header']['size_bits'] + packet['payload_size_bits']
@@ -299,6 +351,43 @@ class KPITracker:
                         f"----------------------------------------")
         
         # Add to stack 
+        self.history_log.append(report_entry)'''
+    def record_transmission(self, packet, latency_sec, is_relevant, target_region):
+        payload_bits = packet['payload_size_bits']
+        header_bits = packet['header']['size_bits']
+        total_bits = payload_bits + header_bits
+
+        # Airtime for energy efficiency
+        THROUGHPUT = 2.5 * 10**6
+        airtime = total_bits / THROUGHPUT
+
+        # Distance for reliability
+        distance_km = DISTANCES_FROM_DELHI.get(target_region, 1300)
+        # KPI calculations
+        spectral_eff = calculate_spectral_efficiency(packet)
+        relevance = calculate_relevance(packet, target_region)
+        latency = calculate_latency(target_region, payload_bits)
+        reliability = calculate_reliability(distance_km)
+        energy_eff = calculate_energy_efficiency(payload_bits, airtime)
+        # Aggregate tracking (unchanged meaning)
+        self.latencies.append(latency)
+        self.total_bits += total_bits
+        self.useful_bits += payload_bits
+        self.total_deliveries += 1
+        if relevance > 50:
+            self.relevant_deliveries += 1
+
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        report_entry = (
+            f"[{timestamp}] BROADCAST EVENT #{len(self.history_log)+1}\n"
+            f" > Target Region: {target_region}\n"
+            f" > Latency: {latency*1000:.2f} ms\n"
+            f" > Spectral Eff.: {spectral_eff:.2f} %\n"
+            f" > Reliability: {reliability:.2f} %\n"
+            f" > Relevance: {relevance:.1f} %\n"
+            f" > Energy Eff.: {energy_eff:.2f} bits/J\n"
+            f"----------------------------------------"
+        )
         self.history_log.append(report_entry)
 
     def get_full_report(self):
@@ -306,24 +395,20 @@ class KPITracker:
         avg_lat = np.mean(self.latencies) if self.latencies else 0.0
         eff = (self.useful_bits / self.total_bits * 100) if self.total_bits > 0 else 0.0
         rel = (self.relevant_deliveries / self.total_deliveries * 100) if self.total_deliveries > 0 else 0.0
-        
         header = (f"=== CUMULATIVE SUMMARY ===\n"
                   f"Avg Latency:  {avg_lat*1000:.1f} ms\n"
                   f"Net Efficency:{eff:.1f} %\n"
                   f"Relevance:    {rel:.1f} %\n"
                   f"==========================\n\n")
-        
         # 2. The Stack (Reversed so newest is top)
         if not self.history_log:
             return header + "(No broadcasts yet)"
-            
         stack = "\n".join(reversed(self.history_log))
         return header + stack
-
 # -----------------------------
 # 4. SETUP & GLOBAL STATE
 # -----------------------------
-MODEL_FILE, VECTORIZER_FILE = 'language_model_rf.pkl', 'vectorizer_rf.pkl'
+MODEL_FILE, VECTORIZER_FILE = 'language_models_rf.pkl', 'vectorizer_rf.pkl'
 MODEL_ACTIVE = False
 if os.path.exists(MODEL_FILE) and os.path.exists(VECTORIZER_FILE):
     try:
