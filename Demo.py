@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import simpledialog, messagebox, scrolledtext
 import joblib
 import os
+import pandas as pd
 import datetime
 import time
 import requests
@@ -14,6 +15,7 @@ import re
 import threading
 from collections import deque
 from queue import Queue
+import csv
 AGENT_INPUT_QUEUE = Queue()
 AGENT_QUEUE = deque()
 DISPATCH_INTERVAL = 5  # seconds
@@ -44,7 +46,7 @@ JSON schema:
             "model": "mistral",
             "prompt": prompt,
             "stream": False
-        }, timeout=500)
+        }, timeout=700)
 
         raw = res.json().get("response", "").strip()
 
@@ -125,7 +127,7 @@ LANGUAGE_HINTS = {
     "Tamil Nadu": ["வணக்கம்", "நிலநடுக்கம்", "புயல்"],
     "Kerala": ["വെള്ളപ്പൊക്കം", "ചുഴലിക്കാറ്റ്"],
     "Karnataka": ["ಭೂಕಂಪ", "ಚಂಡಮಾರುತ"],
-    "Andhra Pradesh": ["భూకంపం", "చక్రవాతం"],
+    #"Andhra Pradesh": ["భూకంపం", "చక్రవాతం"],
     "Telangana": ["భూకంపం", "చక్రవాతం"],
     "Delhi": ["earthquake", "alert", "emergency", "भूकंप"],
     "Gujarat": ["ભૂકંપ", "ચક્રવાત"],
@@ -179,7 +181,9 @@ PRIORITY_ORDER = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
 
 def agent_dispatch():
     global LAST_DISPATCH_TIME
-
+    if CURRENT_SYSTEM == "TRADITIONAL":
+        return
+    
     if not AGENT_QUEUE:
         return
 
@@ -204,6 +208,36 @@ def agent_dispatch():
     )
 
 
+CURRENT_SYSTEM = "ATSC3.0+AI"  # or "TRADITIONAL"
+CSV_LOG_FILE = "atsc3_comparative_data.csv"
+if not os.path.exists(CSV_LOG_FILE):
+    with open(CSV_LOG_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "Timestamp",
+            "System_Type",
+            "Target_Region",
+            "Latency_Sec",
+            "Spectral_Efficiency_Pct",
+            "Relevance_Pct",
+            "Reliability_Pct",
+            "Energy_Eff_BitsPerJ"
+        ])
+
+def log_kpi_csv(system, target, lat, eff, rel, reliab, energy):
+    with open(CSV_LOG_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            datetime.datetime.now(),
+            system,
+            target,
+            lat,
+            eff,
+            rel,
+            reliab,
+            energy
+        ])
+
 
 # -----------------------------
 # 1. PHYSICS & NETWORK CONSTANTS
@@ -222,7 +256,6 @@ DISTANCES_FROM_DELHI = {
     "West Bengal": 1300,
     "Gujarat": 800,
     "Karnataka": 2000,
-    "Andhra Pradesh": 1400,
     "Tamil Nadu": 2200,
     "Kerala": 2600,
     "All": 1300        
@@ -231,6 +264,174 @@ DISTANCES_FROM_DELHI = {
 # -----------------------------
 # 2. MODULAR BROADCAST STRATEGY
 # -----------------------------
+class KPIEngine:
+    def __init__(self):
+        self.latencies = []
+        self.total_bits = 0
+        self.useful_bits = 0
+        self.relevant_deliveries = 0
+        self.total_deliveries = 0
+        self.history_log = []
+
+    def calculate_hero_metrics(self, packet, distance_km):
+        # --- AI-NATIVE ATSC 3.0 CONSTANTS ---
+        CHANNEL_BW = 6.0 * 10**6
+        LDM_GAIN = 1.40 
+        OVERHEAD_LOSS = 0.20
+        THROUGHPUT = 2.5 * 10**6
+        TX_POWER = 20.0 
+
+        # 1. Efficiency
+        total_bits = packet['header']['size_bits'] + packet['payload_size_bits']
+        tx_duration = total_bits / THROUGHPUT
+        raw_eff = (packet['payload_size_bits'] / (CHANNEL_BW * tx_duration)) * 100
+        efficiency_pct = min(raw_eff * LDM_GAIN * (1.0 - OVERHEAD_LOSS), 99.9)
+
+        # 2. Latency
+        t_backhaul = DISTANCES_FROM_DELHI.get(packet['metadata']['target'], 1300) / SPEED_LIGHT_FIBER
+        t_ota = 50.0 / SPEED_LIGHT_AIR
+        latency = t_backhaul + 0.200 + tx_duration + t_ota
+
+        # 3. Reliability (Robust -5dB)
+        path_loss = 10 * 2.8 * np.log10(distance_km if distance_km > 0.1 else 0.1)
+        rx_power = 43.0 - path_loss + np.random.normal(0, 5.0)
+        snr = rx_power - (-95.0)
+        reliability = (1 / (1 + np.exp(-(snr - (-5.0))))) * 100.0
+
+        # 4. Energy
+        energy = packet['payload_size_bits'] / (TX_POWER * tx_duration) if tx_duration > 0 else 0
+
+        return latency, efficiency_pct, reliability, energy
+    
+    def calculate_legacy_metrics(self, packet, distance_km):
+        # --- DVB-T2 / LEGACY CONSTANTS ---
+        CHANNEL_BW = 8.0 * 10**6      # DVB-T2 often uses 8MHz
+        LDM_GAIN = 1.0                # No LDM
+        OVERHEAD_LOSS = 0.25          
+        THROUGHPUT = 2.0 * 10**6      
+        TX_POWER = 20.0
+
+        # 1. Efficiency
+        total_bits = packet['header']['size_bits'] + packet['payload_size_bits']
+        tx_duration = total_bits / THROUGHPUT
+        raw_eff = (packet['payload_size_bits'] / (CHANNEL_BW * tx_duration)) * 100
+        efficiency_pct = min(raw_eff * LDM_GAIN * (1.0 - OVERHEAD_LOSS), 85.0)
+
+        # 2. Latency
+        t_backhaul = DISTANCES_FROM_DELHI.get("All", 1300) / SPEED_LIGHT_FIBER
+        t_ota = 50.0 / SPEED_LIGHT_AIR
+        latency = t_backhaul + 0.300 + tx_duration + t_ota
+
+        # 3. Reliability (9dB Threshold)
+        path_loss = 10 * 2.8 * np.log10(distance_km if distance_km > 0.1 else 0.1)
+        rx_power = 43.0 - path_loss + np.random.normal(0, 5.0)
+        snr = rx_power - (-95.0)
+        reliability = (1 / (1 + np.exp(-(snr - 9.0)))) * 100.0
+
+        # 4. Energy (Unadjusted for now)
+        energy = packet['payload_size_bits'] / (TX_POWER * tx_duration) if tx_duration > 0 else 0
+        return latency, efficiency_pct, reliability, energy
+    
+    #here
+    def record_transmission(self, packet, latency_sec, is_relevant, distance_km, target_region):
+        # 1. Select KPI model
+        if CURRENT_SYSTEM == "ATSC3.0+AI":
+            latency, eff, reliability, energy = self.calculate_hero_metrics(
+                packet, distance_km
+            )
+            relevance = 100.0 if packet['metadata']['target_region'] != "All" else 10.0
+        else:
+            latency, eff, reliability, energy = self.calculate_legacy_metrics(
+                packet, distance_km
+            )
+            relevance = 10.0  # legacy always floods
+
+        # 2. Aggregate stats
+        payload_bits = packet['payload_size_bits']
+        header_bits = packet['header']['size_bits']
+        total_bits = payload_bits + header_bits
+
+        self.latencies.append(latency)
+        self.total_bits += total_bits
+        self.useful_bits += payload_bits
+        self.total_deliveries += 1
+        if relevance > 50:
+            self.relevant_deliveries += 1
+
+        # 3. Human-readable report entry
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        report_entry = (
+            f"[{timestamp}] BROADCAST EVENT #{len(self.history_log)+1}\n"
+            f" > Mode:        {CURRENT_SYSTEM}\n"
+            f" > Target:      {target_region}\n"
+            f" > Latency:     {latency*1000:.2f} ms\n"
+            f" > Efficiency:  {eff:.2f} %\n"
+            f" > Reliability: {reliability:.2f} %\n"
+            f" > Relevance:   {relevance:.1f} %\n"
+            f" > Energy Eff.: {energy:.2f} bits/J\n"
+            f"----------------------------------------"
+        )
+        self.history_log.append(report_entry)
+
+        # 4. CSV logging (single source of truth)
+        log_kpi_csv(
+            CURRENT_SYSTEM,
+            target_region,
+            latency,
+            eff,
+            relevance,
+            reliability,
+            energy
+        )
+
+    def get_full_report(self):
+        # 1. Global Stats
+        avg_lat = np.mean(self.latencies) if self.latencies else 0.0
+        eff = (self.useful_bits / self.total_bits * 100) if self.total_bits > 0 else 0.0
+        rel = (self.relevant_deliveries / self.total_deliveries * 100) if self.total_deliveries > 0 else 0.0
+        header = (f"=== CUMULATIVE SUMMARY ===\n"
+                  f"Avg Latency:  {avg_lat*1000:.1f} ms\n"
+                  f"Net Efficency:{eff:.1f} %\n"
+                  f"Relevance:    {rel:.1f} %\n"
+                  f"==========================\n\n")
+        # 2. The Stack (Reversed so newest is top)
+        if not self.history_log:
+            return header + "(No broadcasts yet)"
+        stack = "\n".join(reversed(self.history_log))
+        return header + stack
+
+
+    '''def calculate_legacy_metrics(self, packet, distance_km):
+        # --- DVB-T2 / LEGACY CONSTANTS ---
+        CHANNEL_BW = 8.0 * 10**6      # DVB-T2 often uses 8MHz
+        LDM_GAIN = 1.0                # No LDM
+        OVERHEAD_LOSS = 0.25          
+        THROUGHPUT = 2.0 * 10**6      
+        TX_POWER = 20.0
+
+        # 1. Efficiency
+        total_bits = packet['header']['size_bits'] + packet['payload_size_bits']
+        tx_duration = total_bits / THROUGHPUT
+        raw_eff = (packet['payload_size_bits'] / (CHANNEL_BW * tx_duration)) * 100
+        efficiency_pct = min(raw_eff * LDM_GAIN * (1.0 - OVERHEAD_LOSS), 85.0)
+
+        # 2. Latency
+        t_backhaul = DISTANCES_FROM_DELHI.get("All", 1300) / SPEED_LIGHT_FIBER
+        t_ota = 50.0 / SPEED_LIGHT_AIR
+        latency = t_backhaul + 0.300 + tx_duration + t_ota
+
+        # 3. Reliability (9dB Threshold)
+        path_loss = 10 * 2.8 * np.log10(distance_km if distance_km > 0.1 else 0.1)
+        rx_power = 43.0 - path_loss + np.random.normal(0, 5.0)
+        snr = rx_power - (-95.0)
+        reliability = (1 / (1 + np.exp(-(snr - 9.0)))) * 100.0
+
+        # 4. Energy (Unadjusted for now)
+        energy = packet['payload_size_bits'] / (TX_POWER * tx_duration) if tx_duration > 0 else 0
+
+        return latency, efficiency_pct, reliability, energy'''    
+
+
 class BroadcastSystem:
     def encapsulate(self, payload, target_region, service_id):
         raise NotImplementedError
@@ -317,7 +518,7 @@ def calculate_energy_efficiency(useful_bits, airtime_sec):
     energy = TX_POWER_WATTS * airtime_sec
     return useful_bits / energy if energy > 0 else 0.0
 
-class KPITracker:
+'''class KPITracker:
     def __init__(self):
         # Global Aggregates
         self.latencies = []
@@ -329,7 +530,7 @@ class KPITracker:
         # Transaction History (The Stack)
         self.history_log = [] 
 
-    '''def record_transmission(self, packet, latency_sec, is_relevant, target_region):
+    def record_transmission(self, packet, latency_sec, is_relevant, target_region):
         # Update Aggregates
         self.latencies.append(latency_sec)
         pkt_total = packet['header']['size_bits'] + packet['payload_size_bits']
@@ -352,59 +553,6 @@ class KPITracker:
         
         # Add to stack 
         self.history_log.append(report_entry)'''
-    def record_transmission(self, packet, latency_sec, is_relevant, target_region):
-        payload_bits = packet['payload_size_bits']
-        header_bits = packet['header']['size_bits']
-        total_bits = payload_bits + header_bits
-
-        # Airtime for energy efficiency
-        THROUGHPUT = 2.5 * 10**6
-        airtime = total_bits / THROUGHPUT
-
-        # Distance for reliability
-        distance_km = DISTANCES_FROM_DELHI.get(target_region, 1300)
-        # KPI calculations
-        spectral_eff = calculate_spectral_efficiency(packet)
-        relevance = calculate_relevance(packet, target_region)
-        latency = calculate_latency(target_region, payload_bits)
-        reliability = calculate_reliability(distance_km)
-        energy_eff = calculate_energy_efficiency(payload_bits, airtime)
-        # Aggregate tracking (unchanged meaning)
-        self.latencies.append(latency)
-        self.total_bits += total_bits
-        self.useful_bits += payload_bits
-        self.total_deliveries += 1
-        if relevance > 50:
-            self.relevant_deliveries += 1
-
-        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-        report_entry = (
-            f"[{timestamp}] BROADCAST EVENT #{len(self.history_log)+1}\n"
-            f" > Target Region: {target_region}\n"
-            f" > Latency: {latency*1000:.2f} ms\n"
-            f" > Spectral Eff.: {spectral_eff:.2f} %\n"
-            f" > Reliability: {reliability:.2f} %\n"
-            f" > Relevance: {relevance:.1f} %\n"
-            f" > Energy Eff.: {energy_eff:.2f} bits/J\n"
-            f"----------------------------------------"
-        )
-        self.history_log.append(report_entry)
-
-    def get_full_report(self):
-        # 1. Global Stats
-        avg_lat = np.mean(self.latencies) if self.latencies else 0.0
-        eff = (self.useful_bits / self.total_bits * 100) if self.total_bits > 0 else 0.0
-        rel = (self.relevant_deliveries / self.total_deliveries * 100) if self.total_deliveries > 0 else 0.0
-        header = (f"=== CUMULATIVE SUMMARY ===\n"
-                  f"Avg Latency:  {avg_lat*1000:.1f} ms\n"
-                  f"Net Efficency:{eff:.1f} %\n"
-                  f"Relevance:    {rel:.1f} %\n"
-                  f"==========================\n\n")
-        # 2. The Stack (Reversed so newest is top)
-        if not self.history_log:
-            return header + "(No broadcasts yet)"
-        stack = "\n".join(reversed(self.history_log))
-        return header + stack
 # -----------------------------
 # 4. SETUP & GLOBAL STATE
 # -----------------------------
@@ -416,8 +564,8 @@ if os.path.exists(MODEL_FILE) and os.path.exists(VECTORIZER_FILE):
         MODEL_ACTIVE = True
     except: pass
 
-REGION_MAP_ML = {'TAMIL':'Tamil Nadu', 'HINDI':'Delhi','GUJARATI':'Gujarat', 'TELUGU':['Telangana','Andhra Pradesh'], 'MALAYALAM':'Kerala','KANNADA':'Karnataka','BENGALI':'West Bengal', 'PUNJAB':'Punjab', 'ASSAM':'Assam', 'ENGLISH':'All'}
-REGION_MAPPING = {1: "Tamil Nadu", 2: "Kerala", 3: "Telangana", 4: "Delhi", 5: "Punjab", 6: "Assam", 7: "Gujarat", 8: "West Bengal", 9: "Karnataka", 10: "Andhra Pradesh"}
+REGION_MAP_ML = {'TAMIL':'Tamil Nadu', 'HINDI':'Delhi','GUJARATI':'Gujarat', 'TELUGU':'Telangana', 'MALAYALAM':'Kerala','KANNADA':'Karnataka','BENGALI':'West Bengal', 'PUNJAB':'Punjab', 'ASSAM':'Assam', 'ENGLISH':'All'}
+REGION_MAPPING = {1: "Tamil Nadu", 2: "Kerala", 3: "Telangana", 4: "Delhi", 5: "Punjab", 6: "Assam", 7: "Gujarat", 8: "West Bengal", 9: "Karnataka"}
 REGIONS_GEOM = {
     1: [(5, 5), (30, 8), (28, 25), (6, 22)],
     2: [(30, 8), (55, 6), (60, 22), (28, 25)],
@@ -427,12 +575,12 @@ REGIONS_GEOM = {
     6: [(60, 22), (90, 25), (95, 50), (58, 52)],
     7: [(5, 48), (30, 52), (28, 65), (5, 62)],
     8: [(30, 52), (58, 52), (60, 65), (28, 65)],
-    9: [(58, 52), (95, 50), (90, 65), (60, 65)],
-    10: [(55, 6), (95, 10), (90, 25), (60, 22)]
+    9: [(58, 52), (95, 50), (90, 65), (60, 65)]
+    #10: [(55, 6), (95, 10), (90, 25), (60, 22)]
 }
 
 broadcast_system = ATSC3_Strategy() 
-kpi_engine = KPITracker()
+kpi_engine = KPIEngine()
 broadcast_queue = AGENT_QUEUE
 ue_inboxes = {}
 live_monitor_log = []
@@ -489,8 +637,13 @@ def add_to_queue(event=None):
     root = tk.Tk(); root.withdraw()
     content = simpledialog.askstring("Scheduler", "Enter content:")
     if content:
-        AGENT_INPUT_QUEUE.put(content)
-        messagebox.showinfo("Agent", "Message submitted to agent.")
+        if CURRENT_SYSTEM == "TRADITIONAL":
+            execute_broadcast(content)
+            messagebox.showinfo("Broadcast", "Traditional broadcast sent immediately.")
+            return
+        else:
+            AGENT_INPUT_QUEUE.put(content)
+            messagebox.showinfo("Agent", "Message submitted to agent.")
     root.destroy()
 
 def agent_worker():
@@ -528,19 +681,22 @@ def agent_worker():
 def execute_broadcast(raw_content,forced_region=None):
     # 1. Classification
     target_region = forced_region or "All"
-    if MODEL_ACTIVE:
-        try: target_region = REGION_MAP_ML.get(clf.predict(vectorizer.transform([raw_content]))[0].upper(), "All")
-        except: pass
+    if CURRENT_SYSTEM != "TRADITIONAL":
+        if MODEL_ACTIVE:
+            try: target_region = REGION_MAP_ML.get(clf.predict(vectorizer.transform([raw_content]))[0].upper(), "All")
+            except: pass
+        else:
+            if any(w in raw_content for w in ["வணக்கம்", "Tamil"]): target_region = "Tamil Nadu"
+            elif any(w in raw_content for w in ["Kerala", "Malayalam"]): target_region = "Kerala"
+            elif any(w in raw_content for w in ["Karnataka", "Kannada"]): target_region = "Karnataka"
+            #elif any(w in raw_content for w in ["Andhra", "Telugu"]): target_region = "Andhra Pradesh"
+            elif any(w in raw_content for w in ["Bengali", "West Bengal"]): target_region = "West Bengal"
+            elif any(w in raw_content for w in ["Delhi", "Hindi"]): target_region = "Delhi"
+            elif any(w in raw_content for w in ["Punjab"]): target_region = "Punjab"
+            elif any(w in raw_content for w in ["Assam"]): target_region = "Assam"
+            elif any(w in raw_content for w in ["Telangana","Telugu"]): target_region = "Telangana"
     else:
-        if any(w in raw_content for w in ["வணக்கம்", "Tamil"]): target_region = "Tamil Nadu"
-        elif any(w in raw_content for w in ["Kerala", "Malayalam"]): target_region = "Kerala"
-        elif any(w in raw_content for w in ["Karnataka", "Kannada"]): target_region = "Karnataka"
-        elif any(w in raw_content for w in ["Andhra", "Telugu"]): target_region = "Andhra Pradesh"
-        elif any(w in raw_content for w in ["Bengali", "West Bengal"]): target_region = "West Bengal"
-        elif any(w in raw_content for w in ["Delhi", "Hindi"]): target_region = "Delhi"
-        elif any(w in raw_content for w in ["Punjab"]): target_region = "Punjab"
-        elif any(w in raw_content for w in ["Assam"]): target_region = "Assam"
-        elif any(w in raw_content for w in ["Telangana","Telugu"]): target_region = "Telangana"
+        target_region = "All"
 
     # 2. Encapsulation
     service_id = next((rid for rid, name in REGION_MAPPING.items() if name == target_region), 99)
@@ -576,13 +732,12 @@ def execute_broadcast(raw_content,forced_region=None):
     # If no receivers, we still log it but latency might be theoretical
     if receivers == 0: final_latency = t_backhaul + t_frame + t_trans 
     
-    kpi_engine.record_transmission(packet, final_latency, is_relevant=True, target_region=target_region)
+    kpi_engine.record_transmission(packet, final_latency, distance_km=ota_dist,is_relevant=True, target_region=target_region)
             
     live_monitor_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Sent to {target_region} ({backhaul_km}km) | Lat: {final_latency*1000:.1f}ms")
     return target_region, receivers
 
 def open_cart(event=None):
-    auto_refresh()
     if not AGENT_QUEUE:
         root = tk.Tk(); root.withdraw()
         messagebox.showinfo("Info", "Agent queue is empty.")
@@ -703,6 +858,11 @@ def open_cart(event=None):
     auto_refresh()
     win.mainloop()'''
 
+def toggle_mode(event=None):
+    global CURRENT_SYSTEM
+    CURRENT_SYSTEM = "TRADITIONAL" if CURRENT_SYSTEM == "ATSC3.0+AI" else "ATSC3.0+AI"
+    messagebox.showinfo("Mode Changed", f"Current Mode: {CURRENT_SYSTEM}")
+
 
 def open_monitor(event=None):
     root = tk.Tk(); root.title("Broadcast Monitor & KPIs")
@@ -733,6 +893,40 @@ def on_pick(event):
     content = "".join([f"[{p['protocol']}] {p['payload'][:20]}...\n" for p in inbox])
     root = tk.Tk(); root.withdraw(); messagebox.showinfo(f"UE {ue['UE_ID']}", f"Region: {ue['Physical_Region']}\n\n{content}"); root.destroy()
 
+
+def plot_comparison(event=None):
+    df = pd.read_csv(CSV_LOG_FILE)
+
+    if df['System_Type'].nunique() < 2:
+        messagebox.showwarning("Insufficient Data",
+                               "Run broadcasts in BOTH modes first.")
+        return
+
+    summary = df.groupby("System_Type").mean(numeric_only=True)
+
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+    fig.suptitle("ATSC 3.0 vs Traditional Broadcast Comparison")
+
+    axes[0,0].bar(summary.index, summary['Spectral_Efficiency_Pct'])
+    axes[0,0].set_title("Spectral Efficiency (%)")
+
+    axes[0,1].bar(summary.index, summary['Relevance_Pct'])
+    axes[0,1].set_title("Content Relevance (%)")
+
+    axes[0,2].bar(summary.index, summary['Latency_Sec'] * 1000)
+    axes[0,2].set_title("Latency (ms)")
+
+    axes[1,0].bar(summary.index, summary['Reliability_Pct'])
+    axes[1,0].set_title("Reliability (%)")
+
+    axes[1,1].bar(summary.index, summary['Energy_Eff_BitsPerJ'])
+    axes[1,1].set_title("Energy Efficiency (bits/J)")
+
+    axes[1,2].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
 # -----------------------------
 # 6. VISUALIZATION
 # -----------------------------
@@ -756,13 +950,22 @@ ax_mon = plt.axes([0.045, 0.50, 0.15, 0.06])
 btn_add = Button(ax_add, 'Add Content (+)', color='#b2dfdb', hovercolor='#80cbc4')
 btn_cart = Button(ax_cart, 'View Schedule', color='#ffe0b2', hovercolor='#ffcc80')
 btn_mon = Button(ax_mon, 'Monitor & KPIs', color='#fff9c4', hovercolor='#fff59d')
+ax_plot = plt.axes([0.045, 0.40, 0.15, 0.06])
+btn_plot = Button(ax_plot, 'Compare Graphs', color='#e1bee7')
+ax_mode = plt.axes([0.045, 0.30, 0.15, 0.06])
+btn_mode = Button(ax_mode, 'Toggle Mode', color='#c8e6c9')
+
+
+
 
 btn_add.on_clicked(add_to_queue)
 btn_cart.on_clicked(open_cart)
 btn_mon.on_clicked(open_monitor)
+btn_plot.on_clicked(plot_comparison)
+btn_mode.on_clicked(toggle_mode)
 
 # Draw Map
-colors = plt.cm.Set3(np.linspace(0, 1, 11))
+colors = plt.cm.Set3(np.linspace(0, 1, 10))
 for i, (rid, poly) in enumerate(REGIONS_GEOM.items()):
     ax.add_patch(Polygon(poly, closed=True, color=colors[i], alpha=0.5))
     cx, cy = np.mean([p[0] for p in poly]), np.mean([p[1] for p in poly])
