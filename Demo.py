@@ -16,13 +16,14 @@ import threading
 from collections import deque
 from queue import Queue
 import csv
+BROADCAST_HISTORY = deque(maxlen=5)
 AGENT_INPUT_QUEUE = Queue()
 AGENT_QUEUE = deque()
 DISPATCH_INTERVAL = 5  # seconds
 LAST_DISPATCH_TIME = 0
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "qwen2.5:1.5b"
+OLLAMA_MODEL = "mistral"
 
 def ollama_analyze(text):
     prompt = f"""
@@ -43,18 +44,22 @@ JSON schema:
 
     try:
         res = requests.post("http://localhost:11434/api/generate", json={
-            "model": "mistral",
+            "model": OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False
-        }, timeout=300)
+        }, timeout=100)
 
         raw = res.json().get("response", "").strip()
+        if not raw:
+            return None
+
+        try:
+            return json.loads(raw)
+        except:
+            return None
 
         # HARD CLEANUP — strip code blocks if Ollama adds them
-        raw = re.sub(r"```json|```", "", raw).strip()
-
-        # Try parsing safely
-        return json.loads(raw)
+        #raw = re.sub(r"```json|```", "", raw).strip()
 
     except Exception as e:
         print("OLLAMA FAIL:", e)
@@ -66,7 +71,7 @@ ALERT_KEYWORDS = {
         # Kannada
         "ಭೂಕಂಪ", "ಸ್ಫೋಟ", "ಅಗ್ನಿ", "ಬಾಂಬ್",
         # Tamil
-        "நிலநடுக்கம்", "சுனாமி", "வெடிப்பு", "தீ", "வாயு கசிவு",
+        "நிலநடுக்கம்", "சுனாமி", "வெடிப்பு", "தீ", "வாயு கசிவு","அவசரம்",
         # Telugu
         "భూకంపం", "సునామీ", "విస్ఫోటనం", "అగ్ని",
         # Malayalam
@@ -76,7 +81,7 @@ ALERT_KEYWORDS = {
         # Punjabi
         "ਭੂਚਾਲ", "ਸੁਨਾਮੀ", "ਵਿਸਫੋਟ", "ਅੱਗ",
         # Bengali
-        "ভূমিকম্প", "সুনামি", "বিস্ফোরণ", "আগুন",
+        "ভূমিকম্প", "সুনামি", "বিস্ফোরণ", "আগুন","ভাইরাস"
         # Assamese
         "ভূমিকম্প", "সুনামি", "বিস্ফোৰণ", "আগুন",
         # Gujarati
@@ -85,10 +90,10 @@ ALERT_KEYWORDS = {
     "P2": [
         "cyclone", "flood", "storm", "industrial","education","state-specific",
         "ಚಂಡಮಾರುತ", "ನೆರೆ", "ಮಳೆ",
-        "புயல்", "வெள்ளம்",
+        "புயல்", "வெள்ளம்","சூறாவளி",
         "చక్రవాతం", "వరద",
         "ചുഴലിക്കാറ്റ്", "വെള്ളപ്പൊക്കം",
-        "तूफान", "बाढ़",
+        "तूफान", "बाढ़","हवा",
         "ਤੂਫ਼ਾਨ", "ਬਾਰਿਸ਼",
         "ঘূর্ণিঝড়", "বন্যা",
         "ঘূর্ণিঝড়", "বন্যা",
@@ -122,29 +127,30 @@ ALERT_KEYWORDS = {
     ]
 }
 LANGUAGE_HINTS = {
-    "Tamil Nadu": ["வணக்கம்", "நிலநடுக்கம்", "புயல்"],
-    "Kerala": ["വെള്ളപ്പൊക്കം", "ചുഴലിക്കാറ്റ്"],
-    "Karnataka": ["ಭೂಕಂಪ", "ಚಂಡಮಾರುತ"],
+    "Tamil Nadu": ["வணக்கம்", "நிலநடுக்கம்", "புயல்","Tamil"],
+    "Kerala": ["വെള്ളപ്പൊക്കം", "ചുഴലിക്കാറ്റ്","Kerala","Malayalam"],
+    "Karnataka": ["ಭೂಕಂಪ", "ಚಂಡಮಾರುತ","Karnataka"],
     #"Andhra Pradesh": ["భూకంపం", "చక్రవాతం"],
-    "Telangana": ["భూకంపం", "చక్రవాతం"],
-    "Delhi": ["earthquake", "alert", "emergency", "भूकंप", "तूफान", "सुनामी"],
-    "Gujarat": ["ભૂકંપ", "ચક્રવાત"],
-    "Assam": ["ভূমিকম্প", "বন্যা"],
-    "West Bengal": ["ভূমিকম্প", "ঘূর্ণিঝড়"],
-    "Punjab": ["ਭੂਚਾਲ", "ਤੂਫ਼ਾਨ"]
+    "Telangana": ["భూకంపం", "చక్రవాతం", "Telugu","Telangana"],
+    "Delhi": ["earthquake", "alert", "emergency", "भूकंप", "तूफान", "सुनामी","Delhi","Hindi"],
+    "Gujarat": ["ભૂકંપ", "ચક્રવાત","Gujarat","Gujarati"],
+    "Assam": ["ভূমিকম্প", "বন্যা","Assam","Assamese"],
+    "West Bengal": ["ভূমিকম্প", "ঘূর্ণিঝড়","Bengali","West Bengal"],
+    "Punjab": ["ਭੂਚਾਲ", "ਤੂਫ਼ਾਨ","Punjab","Punjabi"],
 }
-
 def detect_priority(text):
     text = text.lower()
     for p, words in ALERT_KEYWORDS.items():
-        if any(w in text for w in words):
-            return p
-    return "P4"  
-
+        for w in words:
+            if w.lower() in text:
+                return p
+    return "P4"
 def detect_region_deterministic(text):
+    text_lower = text.lower()
     for region, hints in LANGUAGE_HINTS.items():
-        if any(h in text for h in hints):
-            return region
+        for h in hints:
+            if h.lower() in text_lower:
+                return region
     return None
 
 def agent_decide_and_schedule(raw_content):
@@ -202,10 +208,10 @@ def agent_dispatch():
     execute_broadcast(job["content"], forced_region=job["region"])
     live_monitor_log.append(
         f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
-        f"AGENT DISPATCH → {job['priority']} → {job['region']}"
+        f"AGENT DISPATCH → {job['priority']}"
     )
 CURRENT_SYSTEM = "ATSC3.0+AI"  
-CSV_LOG_FILE = "atsc3_comparative_data.csv"
+CSV_LOG_FILE = "atsc3_comparative_datas.csv"
 if not os.path.exists(CSV_LOG_FILE):
     with open(CSV_LOG_FILE, "w", newline="") as f:
         writer = csv.writer(f)
@@ -317,17 +323,33 @@ class KPIEngine:
         energy = packet['payload_size_bits'] / (TX_POWER * tx_duration) if tx_duration > 0 else 0
         return latency, efficiency_pct, reliability, energy
     
-    def record_transmission(self, packet, latency_sec, is_relevant, distance_km, target_region):
+    def record_transmission(self, packet, latency_sec, count_intended_users, count_receiving_users, distance_km, target_region):   
+        mdict = {'lat':0, 'effi':0, 'reliab':0, 'eng':0}
         if CURRENT_SYSTEM == "ATSC3.0+AI":
             latency, eff, reliability, energy = self.calculate_hero_metrics(
                 packet, distance_km
             )
-            relevance = 100.0 if packet['metadata']['target_region'] != "All" else 10.0
+            #relevance = is_relevant #100.0 if packet['metadata']['target_region'] != "All" else 10.0
         else:
             latency, eff, reliability, energy = self.calculate_legacy_metrics(
                 packet, distance_km
             )
-            relevance = 10.0 
+        final_relevance_pct=0
+        if count_intended_users > 0:
+            final_relevance_pct = (count_intended_users / count_receiving_users) * 100.0
+            final_relevance_pct = min(final_relevance_pct, 100.0)
+        mdict['lat']+=latency
+        mdict['effi']+=eff
+        mdict['reliab']+=reliability
+        mdict['eng']+=energy
+        # ---------------------------------------------------------
+        lat = mdict['lat']/count_receiving_users
+        eng = mdict['eng']/count_receiving_users
+        reliab = mdict['reliab']/count_receiving_users
+        effi = mdict['effi']/count_receiving_users
+        # Energy Penalty for Traditional: Wasted energy on non-relevant users
+        if CURRENT_SYSTEM != "ATSC3.0+AI":
+            energy = energy * (final_relevance_pct / 100.0)
         payload_bits = packet['payload_size_bits']
         header_bits = packet['header']['size_bits']
         total_bits = payload_bits + header_bits
@@ -335,29 +357,29 @@ class KPIEngine:
         self.total_bits += total_bits
         self.useful_bits += payload_bits
         self.total_deliveries += 1
-        if relevance > 50:
+        if final_relevance_pct > 50:
             self.relevant_deliveries += 1
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
         report_entry = (
             f"[{timestamp}] BROADCAST EVENT #{len(self.history_log)+1}\n"
             f" > Mode:        {CURRENT_SYSTEM}\n"
             f" > Target:      {target_region}\n"
-            f" > Latency:     {latency*1000:.2f} ms\n"
-            f" > Efficiency:  {eff:.2f} %\n"
-            f" > Reliability: {reliability:.2f} %\n"
-            f" > Relevance:   {relevance:.1f} %\n"
-            f" > Energy Eff.: {energy:.2f} bits/J\n"
+            f" > Latency:     {mdict['lat']*1000:.2f} ms\n"
+            f" > Efficiency:  {mdict['effi']:.2f} %\n"
+            f" > Reliability: {mdict['reliab']:.2f} %\n"
+            f" > Relevance:   {final_relevance_pct:.1f} %\n"
+            f" > Energy Eff.: {mdict['eng']:.2f} bits/J\n"
             f"----------------------------------------"
         )
         self.history_log.append(report_entry)
         log_kpi_csv(
             CURRENT_SYSTEM,
             target_region,
-            latency,
-            eff,
-            relevance,
-            reliability,
-            energy
+            mdict['lat'],
+            mdict['effi'],
+            final_relevance_pct,
+            mdict['reliab'],
+            mdict['eng']
         )
 
     def get_full_report(self):
@@ -489,6 +511,11 @@ def agent_worker():
                 region = ai.get("region", region)
 
         if region is None:
+            for region_name, hints in LANGUAGE_HINTS.items():
+                if any(word in raw_content for word in hints):
+                    region = region_name
+                    break
+        if region is None:
             region = "All"
 
         job = {
@@ -501,7 +528,7 @@ def agent_worker():
         AGENT_QUEUE.append(job)
         live_monitor_log.append(
             f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
-            f"AGENT QUEUED → {priority} → {region}"
+            f"AGENT QUEUED → {priority}"
         )
 
         AGENT_INPUT_QUEUE.task_done()
@@ -524,6 +551,7 @@ def execute_broadcast(raw_content,forced_region=None):
             elif any(w in raw_content for w in ["Telangana","Telugu"]): target_region = "Telangana"
     else:
         target_region = "All"
+    #metrics_accum = {'lat':0, 'eff':0, 'reliab':0, 'eng':0}
     service_id = next((rid for rid, name in REGION_MAPPING.items() if name == target_region), 99)
     packet = broadcast_system.encapsulate(raw_content, target_region, service_id)
     backhaul_km = DISTANCES_FROM_DELHI.get(target_region, 1300) 
@@ -531,6 +559,8 @@ def execute_broadcast(raw_content,forced_region=None):
     t_frame = ATSC3_FRAMING_DELAY
     total_bits = packet['header']['size_bits'] + packet['payload_size_bits']
     t_trans = total_bits / ATSC3_BANDWIDTH
+    count_intended_users = 0 
+    count_receiving_users = 0 
     tower_pos = (0,0)
     if target_region != "All":
         rid = next((k for k,v in REGION_MAPPING.items() if v == target_region), 1)
@@ -538,7 +568,10 @@ def execute_broadcast(raw_content,forced_region=None):
     receivers = 0
     final_latency = 0 
     for ue in UEs:
+        if ue["Physical_Region"] == target_region:
+            count_intended_users += 1
         if target_region == "All" or ue["Physical_Region"] == target_region:
+            count_receiving_users+= 1
             ota_dist = np.sqrt((ue["Position"][0] - tower_pos[0])**2 + (ue["Position"][1] - tower_pos[1])**2)
             t_ota = ota_dist / SPEED_LIGHT_AIR
             total_latency = t_backhaul + t_frame + t_trans + t_ota
@@ -546,25 +579,53 @@ def execute_broadcast(raw_content,forced_region=None):
             ue_inboxes[ue["UE_ID"]].append(packet)
             receivers += 1
     if receivers == 0: final_latency = t_backhaul + t_frame + t_trans 
-    kpi_engine.record_transmission(packet, final_latency, distance_km=ota_dist,is_relevant=True, target_region=target_region)
+    
+    kpi_engine.record_transmission(packet, final_latency, distance_km=ota_dist,count_intended_users=count_intended_users, count_receiving_users=count_receiving_users, target_region=target_region)
     live_monitor_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Sent to {target_region} ({backhaul_km}km) | Lat: {final_latency*1000:.1f}ms")
+    # Save to history (last 5)
+    BROADCAST_HISTORY.append({
+        "content": raw_content,
+        "region": target_region,
+        "time": datetime.datetime.now().strftime("%H:%M:%S")
+    })
     return target_region, receivers
 
 def open_cart(event=None):
-    if not AGENT_QUEUE:
+    '''if not AGENT_QUEUE:
         root = tk.Tk(); root.withdraw()
         messagebox.showinfo("Info", "Agent queue is empty.")
         root.destroy()
-        return
+        return'''
     win = tk.Tk()
     win.title("Agent Broadcast Queue")
     win.geometry("520x350")
     frame = tk.Frame(win)
     frame.pack(fill="both", expand=True)
-
+    pending_inputs = list(AGENT_INPUT_QUEUE.queue)
+    processed_jobs = list(AGENT_QUEUE)
+    if pending_inputs:
+        tk.Label(
+            frame,
+            text="Pending (Awaiting Agent Analysis)",
+            fg="orange",
+            font=("Bold", 10)
+        ).pack(anchor="w", pady=(5, 2))
+        for i, msg in enumerate(pending_inputs):
+            tk.Label(
+                frame,
+                text=f"- {msg[:40]}...",
+                fg="gray"
+            ).pack(anchor="w")
     def refresh():
         for w in frame.winfo_children():
             w.destroy()
+        if processed_jobs:
+            tk.Label(
+                frame,
+                text="Agent Scheduled Broadcasts",
+                fg="green",
+                font=("Bold", 10)
+            ).pack(anchor="w", pady=(10, 2))
 
         sorted_jobs = sorted(
             list(AGENT_QUEUE),
@@ -586,6 +647,16 @@ def open_cart(event=None):
             tk.Button(row, text="Drop",
                       command=lambda j=job: drop_job(j),
                       bg="#ffcdd2").pack(side="right")
+        if BROADCAST_HISTORY:
+            tk.Label(
+                    frame,
+                    text="Recent Broadcasts (Last 5)",
+                    fg="blue",
+                    font=("Bold", 10)
+            ).pack(anchor="w", pady=(10, 2))
+            for i, msg in enumerate(reversed(BROADCAST_HISTORY)):
+                label = f"{i+1}. [{msg['time']}] {msg['region']} | {msg['content'][:40]}..."
+                tk.Label(frame, text=label, fg="gray").pack(anchor="w")
     def auto_refresh():
         refresh()
         win.after(1000, auto_refresh)
